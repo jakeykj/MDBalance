@@ -1,0 +1,47 @@
+# Data parameters
+data:
+  task: phenotype
+  fold: 1
+  matched: true
+  timestep: 1.0
+  ehr_root: /home/comp/cskjyin/bmm_ehr
+  resized_cxr_root: /home/comp/cskjyin/mimic_cxr_resized
+  image_meta_path: /home/comp/cskjyin/mimic-cxr-2.0.0-metadata.csv
+
+stage: "uniehr"
+
+# Model parameters
+model:
+  hidden_size: 256
+  activation: "relu"
+  embedding_dim: 128
+
+ehr_model:
+  checkpoint_path: None
+  hidden_size: 256
+  n_head: 4
+  n_layers: 2
+  dropout: 0.2
+  activation: "relu"
+  embedding_dim: 128
+
+cxr_model:
+  checkpoint_path: None
+  hidden_size: 256
+  dropout: 0.2
+  activation: "relu"
+  embedding_dim: 128
+
+# Training parameters
+training:
+  num_workers: 4
+  batch_size: 32
+  num_epochs: 100
+  patience: 10
+  learning_rate: 0.0001
+  weight_decay: 0
+  optimizer: "adam"
+  scheduler:
+    type: "cosine"
+    warmup_steps: 1000
+
