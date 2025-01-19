@@ -22,7 +22,13 @@ model:
   hidden_size: 256
   ehr_distill_loss_weight: 1
   cxr_distill_loss_weight: 1
-  dropout: 0.2
+  dropout: 0.5
+
+  mixup_alpha: 0.2
+  cutmix_alpha: 1.0
+  mix_prob: 0.5
+  lambda_min: 0.3
+  grad_clip_val: 1.0
 
 ehr_model:
   checkpoint_path: ./teacher_model_checkpoints/phenotype_matched_fold1_ehr_0.42.ckpt
@@ -44,9 +50,5 @@ training:
   num_epochs: 100
   patience: 10
   learning_rate: 0.0001
-  weight_decay: 1e-6
-  optimizer: "adam"
-  scheduler:
-    type: "cosine"
-    warmup_steps: 1000
+  weight_decay: 0
 

@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 import lightning as L
+import numpy as np
+import torch.nn.functional as F
 
 from .ehr_transformer import EHRTransformer, UniEHRTransformer
 from .cxr_model import UniCXRModel
@@ -49,6 +51,13 @@ class LateFuse(BaseFuseTrainer):
             nn.Linear(hparams['model']['hidden_size'], self.num_classes)
         )
 
+        self.mixup_alpha = hparams['model'].get('mixup_alpha', 0.2)
+        self.cutmix_alpha = hparams['model'].get('cutmix_alpha', 1.0)
+        self.mix_prob = hparams['model'].get('mix_prob', 0.5)
+        self.lambda_min = hparams['model'].get('lambda_min', 0.3)
+
+        self.grad_clip_val = hparams['model'].get('grad_clip_val', 1.0)
+
         self.distill_criterion = nn.MSELoss(reduction='none')
         self.ehr_distill_loss_weight = hparams['model']['ehr_distill_loss_weight']
         self.cxr_distill_loss_weight = hparams['model']['cxr_distill_loss_weight']
@@ -64,7 +73,6 @@ class LateFuse(BaseFuseTrainer):
             self.cxr_teacher_model = self.cxr_teacher_model.cxr_model
             for param in self.cxr_teacher_model.parameters():
                 param.requires_grad = False
-
 
     def forward(self, data_dict):
 
@@ -120,35 +128,127 @@ class LateFuse(BaseFuseTrainer):
         
         return outputs
         
+    def _mix_data(self, data_dict, mixing_type='mixup'):
+        """
+        Apply mixup or cutmix to both EHR and CXR data
+        Returns mixed data and mixing information
+        """
+        batch_size = data_dict['ehr_ts'].size(0)
         
+        # Generate random mixing ratio
+        if mixing_type == 'mixup':
+            lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
+        else:  # cutmix
+            lam = np.random.beta(self.cutmix_alpha, self.cutmix_alpha)
+        
+        lam = max(lam, self.lambda_min)
+        index = torch.randperm(batch_size, device=data_dict['ehr_ts'].device)
+        
+        mixed_data = {}
+        
+        # Mix EHR data
+        x_ehr = data_dict['ehr_ts']
+        if mixing_type == 'mixup':
+            mixed_data['ehr_ts'] = lam * x_ehr + (1 - lam) * x_ehr[index]
+        else:  # For EHR, we'll do a temporal cutmix
+            temp_cut_point = int(x_ehr.size(1) * lam)
+            mixed_data['ehr_ts'] = x_ehr.clone()
+            mixed_data['ehr_ts'][:, temp_cut_point:] = x_ehr[index, temp_cut_point:]
+        
+        # Mix CXR images
+        x_cxr = data_dict['cxr_imgs']
+        if mixing_type == 'mixup':
+            mixed_data['cxr_imgs'] = lam * x_cxr + (1 - lam) * x_cxr[index]
+        else:  # cutmix
+            # Generate random box
+            W, H = x_cxr.size(2), x_cxr.size(3)
+            cut_rat = np.sqrt(1. - lam)
+            cut_w = int(W * cut_rat)
+            cut_h = int(H * cut_rat)
+            
+            cx = np.random.randint(W)
+            cy = np.random.randint(H)
+            
+            bbx1 = np.clip(cx - cut_w // 2, 0, W)
+            bby1 = np.clip(cy - cut_h // 2, 0, H)
+            bbx2 = np.clip(cx + cut_w // 2, 0, W)
+            bby2 = np.clip(cy + cut_h // 2, 0, H)
+            
+            mixed_data['cxr_imgs'] = x_cxr.clone()
+            mixed_data['cxr_imgs'][:, :, bbx1:bbx2, bby1:bby2] = \
+                x_cxr[index, :, bbx1:bbx2, bby1:bby2]
+            
+            # Adjust lambda based on actual box size
+            lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (W * H))
+        
+        # Handle other necessary data
+        mixed_data['seq_len'] = data_dict['seq_len']  # Keep original sequence lengths
+        mixed_data['has_cxr'] = data_dict['has_cxr']  # Keep original CXR availability flags
+        
+        # Mix labels - important for training!
+        mixed_data['labels'] = data_dict['labels']  # Original labels needed for loss computation
+        mixed_data['mixed_labels'] = data_dict['labels'][index]  # Mixed labels needed for loss computation
+        mixed_data['lambda'] = lam  # Save mixing ratio for loss computation
+        
+        return mixed_data
+
     def training_step(self, batch, batch_idx):
-        out = self._shared_step(batch) # model forward
-
-        pairs = batch['has_cxr']
-        ehr_mask = torch.ones_like(out['feat_ehr'][:, 0])
-
-        # loss_ehr = self._compute_masked_pred_loss(out['pred_ehr'], batch['labels'], ehr_mask)
-        # loss_cxr = self._compute_masked_pred_loss(out['pred_cxr'],batch['labels'], pairs)
-        loss_fuse = self._compute_masked_pred_loss(out['predictions'], batch['labels'], pairs)
-
-        # loss_total = loss_ehr + loss_cxr + loss_fuse
-        loss_total = loss_fuse
-
-        # distill loss
-        if self.hparams['model']['ehr_modal_distill']:  
-            loss_ehr_distill = self._compute_masked_distill_loss(out['feat_ehr'], out['feat_ehr_teacher'].data, ehr_mask)
-            loss_total = loss_total +  self.ehr_distill_loss_weight * loss_ehr_distill
-        if self.hparams['model']['cxr_modal_distill']:
-            loss_cxr_distill = self._compute_masked_distill_loss(out['feat_cxr'], out['feat_cxr_teacher'].data, pairs)
-            loss_total = loss_total + self.cxr_distill_loss_weight * loss_cxr_distill
-
-
-        self.log_dict({'loss/train': loss_total.detach(),
-                       'loss/train_ehr_distill': loss_ehr_distill.detach(),
-                       'loss/train_cxr_distill': loss_cxr_distill.detach()},
-                      on_epoch=True, on_step=True,
-                      batch_size=batch['labels'].shape[0])
-
+        # Decide whether to apply mixing and which type
+        do_mixing = np.random.random() < self.mix_prob
+        if do_mixing:
+            mixing_type = np.random.choice(['mixup', 'cutmix'])
+            mixed_batch = self._mix_data(batch, mixing_type)
+            
+            # Forward pass with mixed data
+            out = self._shared_step(mixed_batch)
+            
+            # Compute mixed loss
+            pairs = mixed_batch['has_cxr']
+            lam = mixed_batch['lambda']
+            
+            # Compute loss with both original and mixed labels
+            loss_fuse_orig = self._compute_masked_pred_loss(
+                out['predictions'], 
+                mixed_batch['labels'],  # original labels
+                pairs
+            )
+            loss_fuse_mixed = self._compute_masked_pred_loss(
+                out['predictions'], 
+                mixed_batch['mixed_labels'],  # mixed labels
+                pairs
+            )
+            loss_fuse = lam * loss_fuse_orig + (1 - lam) * loss_fuse_mixed
+            
+            # Handle distillation losses if enabled
+            if self.hparams['model']['ehr_modal_distill']:
+                ehr_mask = torch.ones_like(out['feat_ehr'][:, 0])
+                loss_ehr_distill = lam * self._compute_masked_distill_loss(
+                    out['feat_ehr'], 
+                    out['feat_ehr_teacher'].data, 
+                    ehr_mask
+                ) + (1 - lam) * self._compute_masked_distill_loss(
+                    out['feat_ehr'], 
+                    out['feat_ehr_teacher'].data, 
+                    ehr_mask
+                )
+                loss_total = loss_fuse + self.ehr_distill_loss_weight * loss_ehr_distill
+            else:
+                loss_total = loss_fuse
+            
+        else:
+            # Original forward pass without mixing
+            out = self._shared_step(batch)
+            pairs = batch['has_cxr']
+            loss_fuse = self._compute_masked_pred_loss(out['predictions'], batch['labels'], pairs)
+            loss_total = loss_fuse
+        
+        # Log metrics
+        self.log_dict({
+            'loss/train': loss_total.detach(),
+            'mix_lambda': torch.tensor(lam) if do_mixing else torch.tensor(1.0),
+            'mix_type': torch.tensor(1.0 if mixing_type == 'mixup' else 2.0) if do_mixing else torch.tensor(0.0),
+        }, on_epoch=True, on_step=True, batch_size=batch['labels'].shape[0])
+        
         return loss_total
 
     def validation_step(self,batch,batch_idx):

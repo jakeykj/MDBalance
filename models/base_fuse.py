@@ -93,8 +93,28 @@ class BaseFuseTrainer(L.LightningModule):
         self.test_results = {x: combined_scores[x] for x in combined_scores}
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.training['learning_rate'], weight_decay=self.hparams.training['weight_decay'])
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.hparams['training']['learning_rate'],
+            weight_decay=self.hparams['training']['weight_decay']
+        )
+        
+        # Cosine annealing with warm restarts
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=10,  # restart every 10 epochs
+            T_mult=2,  # double the restart interval each time
+            eta_min=1e-6  # minimum learning rate
+        )
         return optimizer
+        # return {
+        #     "optimizer": optimizer,
+        #     "lr_scheduler": {
+        #         "scheduler": scheduler,
+        #         "monitor": "loss/val",
+        #         "frequency": 1
+        #     },
+        # }
 
     def evaluate_performance(self, preds,labels):
         
