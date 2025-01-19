@@ -1,5 +1,8 @@
+from functools import partial
 import torch
 from torch import nn
+from torchvision.ops import sigmoid_focal_loss
+
 from .base_fuse import BaseFuseTrainer
 
 class LearnablePositionalEncoding(nn.Module):
@@ -144,7 +147,10 @@ class UniEHRTransformer(BaseFuseTrainer):
                                         d_model=self.hidden_size, n_head=self.n_head,
                                         n_layers=self.n_layers, dropout=self.dropout)
 
-        self.pred_criterion = nn.BCEWithLogitsLoss()
+        if self.hparams['ehr_model']['criterion'] == 'bce':
+            self.pred_criterion = nn.BCEWithLogitsLoss()
+        elif self.hparams['ehr_model']['criterion'] == 'focal':
+            self.pred_criterion = partial(sigmoid_focal_loss, reduction='mean')
 
     def forward(self, data_dict):
         x = data_dict['ehr_ts']
@@ -154,7 +160,6 @@ class UniEHRTransformer(BaseFuseTrainer):
 
         # get shared feature
         loss = self.pred_criterion(predictions, data_dict['labels'])
-        #loss = sigmoid_focal_loss(predictions, data_dict['labels'], reduction='mean')
         outputs = {
             'loss': loss,
             'predictions': predictions.sigmoid()

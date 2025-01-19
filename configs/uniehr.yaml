@@ -1,12 +1,17 @@
+name: run
+gpu: 0
+seed: 42
+dev_run: false
+
 # Data parameters
 data:
   task: phenotype
   fold: 1
   matched: true
   timestep: 1.0
-  ehr_root: /home/comp/cskjyin/bmm_ehr
-  resized_cxr_root: /home/comp/cskjyin/mimic_cxr_resized
-  image_meta_path: /home/comp/cskjyin/mimic-cxr-2.0.0-metadata.csv
+  ehr_root: /research/miccai/datasets/mimiciv_multimodal_full/data
+  resized_cxr_root: /research/mimic_cxr_resized
+  image_meta_path: /hdd/datasets/mimic-cxr-jpg/2.0.0/mimic-cxr-2.0.0-metadata.csv
 
 stage: "uniehr"
 
@@ -14,23 +19,14 @@ stage: "uniehr"
 model:
   hidden_size: 256
   activation: "relu"
-  embedding_dim: 128
 
 ehr_model:
   checkpoint_path: None
-  hidden_size: 256
+  hidden_size: 128
   n_head: 4
   n_layers: 2
   dropout: 0.2
-  activation: "relu"
-  embedding_dim: 128
-
-cxr_model:
-  checkpoint_path: None
-  hidden_size: 256
-  dropout: 0.2
-  activation: "relu"
-  embedding_dim: 128
+  criterion: "bce"
 
 # Training parameters
 training:

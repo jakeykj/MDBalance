@@ -17,8 +17,9 @@ class UniCXRModel(BaseFuseTrainer):
         self.cxr_model = resnet50(weights=ResNet50_Weights.DEFAULT)
         
         # Replace the final classification layer
-        self.cxr_model.fc = nn.Linear(in_features=2048, out_features=self.hparams.cxr_model['hidden_size'])
-        self.cxr_head = nn.Linear(self.hparams.cxr_model['hidden_size'], self.num_classes)
+        cxr_hidden_size = self.hparams.cxr_model['hidden_size']
+        self.cxr_model.fc = nn.Linear(in_features=2048, out_features=cxr_hidden_size)
+        self.cxr_head = nn.Linear(cxr_hidden_size, self.num_classes)
         
         self.pred_criterion = nn.BCEWithLogitsLoss(reduction='none')
 

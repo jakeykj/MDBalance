@@ -1,12 +1,17 @@
+name: run
+gpu: 0
+seed: 42
+dev_run: false
+
 # Data parameters
 data:
   task: phenotype
   fold: 1
   matched: false
   timestep: 1.0
-  ehr_root: /home/comp/cskjyin/bmm_ehr
-  resized_cxr_root: /home/comp/cskjyin/mimic_cxr_resized
-  image_meta_path: /home/comp/cskjyin/mimic-cxr-2.0.0-metadata.csv
+  ehr_root: /research/miccai/datasets/mimiciv_multimodal_full/data
+  resized_cxr_root: /research/mimic_cxr_resized
+  image_meta_path: /hdd/datasets/mimic-cxr-jpg/2.0.0/mimic-cxr-2.0.0-metadata.csv
 
 stage: "unicxr"
 

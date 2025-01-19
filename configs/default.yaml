@@ -7,35 +7,35 @@ dev_run: false
 data:
   task: phenotype
   fold: 1
-  matched: false
+  matched: true
   timestep: 1.0
-  ehr_root: /home/comp/cskjyin/bmm_ehr
-  resized_cxr_root: /home/comp/cskjyin/mimic_cxr_resized
-  image_meta_path: /home/comp/cskjyin/mimic-cxr-2.0.0-metadata.csv
+  ehr_root: /research/miccai/datasets/mimiciv_multimodal_full/data
+  resized_cxr_root: /research/mimic_cxr_resized
+  image_meta_path: /hdd/datasets/mimic-cxr-jpg/2.0.0/mimic-cxr-2.0.0-metadata.csv
 
-stage: "uniehr"
+stage: "fuse"
 
 # Model parameters
 model:
+  ehr_modal_distill: true
+  cxr_modal_distill: true
   hidden_size: 256
-  activation: "relu"
-  embedding_dim: 128
+  ehr_distill_loss_weight: 1
+  cxr_distill_loss_weight: 1
+  dropout: 0.2
 
 ehr_model:
-  checkpoint_path: None
+  checkpoint_path: ./teacher_model_checkpoints/phenotype_matched_fold1_ehr_0.42.ckpt
   hidden_size: 256
   n_head: 4
-  n_layers: 2
+  n_layers: 1
   dropout: 0.2
-  activation: "relu"
-  embedding_dim: 128
+  criterion: "bce"
 
 cxr_model:
-  checkpoint_path: None
-  hidden_size: 256
+  checkpoint_path: ./teacher_model_checkpoints/phenotype_matched_fold1_cxr_0.35.ckpt
+  hidden_size: 256  # retrain?
   dropout: 0.2
-  activation: "relu"
-  embedding_dim: 128
 
 # Training parameters
 training:
@@ -44,7 +44,7 @@ training:
   num_epochs: 100
   patience: 10
   learning_rate: 0.0001
-  weight_decay: 0
+  weight_decay: 1e-6
   optimizer: "adam"
   scheduler:
     type: "cosine"

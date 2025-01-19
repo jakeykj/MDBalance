@@ -32,9 +32,8 @@ def set_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)  # 如果有多个GPU
     torch.set_num_threads(5)
-    L.seed_everything(seed,workers=True)
+    L.seed_everything(seed, workers=True)
 
     # Ensure that all operations are deterministic on GPU (if used) for reproducibility
     torch.backends.cudnn.deterministic = True
@@ -53,7 +52,7 @@ def run_model(cfg: DictConfig):
         cfg.data.matched = True  # use only matched data for unicxr model
 
     elif cfg.stage == 'fuse':
-        raise NotImplementedError(f'stage `{cfg.stage}` is not implemented')
+        model_class = LateFuse
     
     else:
         raise ValueError(f'Unknown stage `{cfg.stage}`')
@@ -88,11 +87,12 @@ def run_model(cfg: DictConfig):
 
     # save the best model in the valid
     checkpoint_callback = ModelCheckpoint(
+        auto_insert_metric_name=False,
         monitor=callback_metric,
         mode='max',
         save_top_k=1,
         verbose=True,
-        filename='{epoch:02d}-{overall/PRAUC:.2f}'
+        filename='epoch{epoch:02d}-PRAUC={overall/PRAUC:.2f}'
     )
 
     trainer = L.Trainer(enable_checkpointing=True,
@@ -109,7 +109,6 @@ def run_model(cfg: DictConfig):
     trainer.fit(model=model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
     ############# Test model #############
-    print("Test model by fixed")
     best_model_path = checkpoint_callback.best_model_path
     print(f"best_model_path: {best_model_path}")
 
