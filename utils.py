@@ -134,8 +134,9 @@ class MultiModalMIMIC(Dataset):
         else:
             for stay_id in tqdm(self.stay_ids,desc="Preloading CXR images"):
                 self.preload_images[stay_id] = self._get_last_cxr_image_by_stay_id(stay_id, self.resized_base_path)
-            with open(cxr_pkl_fpath, 'wb') as f:
-                pickle.dump(self.preload_images, f) 
+            if cxr_pkl_fpath:
+                with open(cxr_pkl_fpath, 'wb') as f:
+                    pickle.dump(self.preload_images, f) 
 
 
         # create labels for prediction task
@@ -163,7 +164,7 @@ class MultiModalMIMIC(Dataset):
             labels = labels[index].unsqueeze(0)
 
         # get image 
-        cxr_img = self.preload_images[stay_id]
+        cxr_img = self.cxr_transform(self.preload_images[stay_id]) if self.preload_images[stay_id] is not None else None
         has_cxr = False if cxr_img == None else True
         groups = None
         meta_attrs = self.meta_attr.loc[stay_id]
@@ -252,7 +253,7 @@ class MultiModalMIMIC(Dataset):
             print(f"{img_path} not exists!!!!")
             return None
 
-        return self.cxr_transform(cxr_img)
+        return cxr_img
 
 
     def get_image_path(self, dicom_id, subject_id, resized_base_path='/research/mimic_cxr_resized'):
@@ -336,7 +337,7 @@ def seed_worker(worker_id):
 
 def create_data_loaders(ehr_data_dir, cxr_data_dir, task, replication, batch_size,
                         num_workers, time_limit=None,matched_subset = False,index = None,seed = None, one_hot=False,
-                        resized_base_path='/research/mimic_cxr_resized',
+                        pkl_dir='./data_pkls/', resized_base_path='/research/mimic_cxr_resized',
                         image_meta_path="/hdd/datasets/mimic-cxr-jpg/2.0.0/mimic-cxr-2.0.0-metadata.csv"):
     set_seed(seed)
     time_limit = 48
@@ -346,7 +347,7 @@ def create_data_loaders(ehr_data_dir, cxr_data_dir, task, replication, batch_siz
         is_train = (split == 'train')
         ds = MultiModalMIMIC(ehr_data_dir, replication, split,
                              cxr_data_dir, task, time_limit=time_limit,matched_subset = matched_subset,index = index, one_hot = one_hot,
-                             pkl_dir='./data_pkls/', resized_base_path=resized_base_path,
+                             pkl_dir=pkl_dir, resized_base_path=resized_base_path,
                              image_meta_path=image_meta_path)
         dl = DataLoader(ds, pin_memory=True,
                         shuffle=is_train, drop_last=is_train,

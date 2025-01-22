@@ -5,7 +5,7 @@ dev_run: false
 
 # Data parameters
 data:
-  task: phenotype
+  task: mortality
   fold: 1
   matched: true
   timestep: 1.0
@@ -18,24 +18,20 @@ stage: "fuse"
 
 # Model parameters
 model:
+  ehr_modal_distill: true
+  cxr_modal_distill: true
   hidden_size: 256
-  dropout: 0.2
-  
-  ehr_modal_distill: true  # flag for performing EHR distillation
-  cxr_modal_distill: true  # flag for performing CXR distillation
   ehr_distill_loss_weight: 1
   cxr_distill_loss_weight: 1
-  
-  enable_mixing: false  # flag for performing mixup and cutmix
-  mixup_alpha: 0.2  # alpha for mixup
-  cutmix_alpha: 1.0  # alpha for cutmix
-  mix_prob: 0.5  # probability of performing mixup or cutmix
-  lambda_min: 0.3  # minimum lambda for mixup
-  
-  grad_clip_val: 1.0  # gradient clipping value
-  
-  ada_loss_weight: true  # flag for performing adaptive distillation loss weight
-  ada_kd_weight_type: "power_law"
+  dropout: 0.2
+  ada_loss_weight: true
+
+  enable_mixing: true
+  mixup_alpha: 0.2
+  cutmix_alpha: 1.0
+  mix_prob: 0.5
+  lambda_min: 0.3
+  grad_clip_val: 1.0
 
 ehr_model:
   checkpoint_path:

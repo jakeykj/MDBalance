@@ -63,7 +63,7 @@ def run_model(cfg: DictConfig):
     train_loader, val_loader, test_loader = create_data_loaders(cfg.data.ehr_root, None, cfg.data.task,
                                                                 cfg.data.fold, cfg.training.batch_size, cfg.training.num_workers,
                                                                 matched_subset=cfg.data.matched, index=None, seed=cfg.seed, one_hot=False,
-                                                                resized_base_path=cfg.data.resized_cxr_root,
+                                                                pkl_dir=cfg.data.pkl_dir, resized_base_path=cfg.data.resized_cxr_root,
                                                                 image_meta_path=cfg.data.image_meta_path)
 
     

@@ -61,18 +61,33 @@ class LateFuse(BaseFuseTrainer):
         self.distill_criterion = nn.MSELoss(reduction='none')
         self.ehr_distill_loss_weight = hparams['model']['ehr_distill_loss_weight']
         self.cxr_distill_loss_weight = hparams['model']['cxr_distill_loss_weight']
+        self.ada_loss_weight = hparams['model'].get('ada_loss_weight', False)
 
         if hparams['model']['ehr_modal_distill']:
-            self.ehr_teacher_model = UniEHRTransformer.load_from_checkpoint(hparams['ehr_model']['checkpoint_path'])
+            checkpoint_path = hparams['ehr_model']['checkpoint_path'][hparams['data']['task']]
+            self.ehr_teacher_model = UniEHRTransformer.load_from_checkpoint(checkpoint_path, map_location='cpu')
             self.ehr_teacher_model = self.ehr_teacher_model.ehr_model
+            
             for param in self.ehr_teacher_model.parameters():
                 param.requires_grad = False
+            self.ehr_teacher_model.eval()
         
         if hparams['model']['cxr_modal_distill']:
-            self.cxr_teacher_model = UniCXRModel.load_from_checkpoint(hparams['cxr_model']['checkpoint_path'])
-            self.cxr_teacher_model = self.cxr_teacher_model.cxr_model
+            checkpoint_path = hparams['cxr_model']['checkpoint_path'][hparams['data']['task']]
+            cxr_teacher_model = UniCXRModel.load_from_checkpoint(checkpoint_path, map_location='cpu')
+            
+            self.cxr_teacher_model = cxr_teacher_model.cxr_model
             for param in self.cxr_teacher_model.parameters():
                 param.requires_grad = False
+            self.cxr_teacher_model.eval()
+
+            self.cxr_teacher_head = cxr_teacher_model.cxr_head
+            for param in self.cxr_teacher_head.parameters():
+                param.requires_grad = False
+            self.cxr_teacher_head.eval()
+
+        # Add tracking for loss weights
+        self.register_buffer('loss_weights', torch.ones(3))  # [train_weight, distill_weight]
 
     def forward(self, data_dict):
 
@@ -106,11 +121,12 @@ class LateFuse(BaseFuseTrainer):
 
         # Distill
         if self.hparams['model']['ehr_modal_distill']:
-            feat_ehr_teacher, _ = self.ehr_teacher_model(x, seq_lengths)
+            feat_ehr_teacher, pred_ehr_teacher = self.ehr_teacher_model(x, seq_lengths)
         else:
             feat_ehr_teacher = None
         if self.hparams['model']['cxr_modal_distill']:
             feat_cxr_teacher = self.cxr_teacher_model(img)
+            pred_cxr_teacher = self.cxr_teacher_head(feat_cxr_teacher)
         else:
             feat_cxr_teacher = None
         
@@ -121,6 +137,8 @@ class LateFuse(BaseFuseTrainer):
             'feat_cxr': feat_cxr,
             'feat_ehr_teacher': feat_ehr_teacher,
             'feat_cxr_teacher': feat_cxr_teacher,
+            'pred_ehr_teacher': pred_ehr_teacher,
+            'pred_cxr_teacher': pred_cxr_teacher,
             'predictions': final_pred,
             'pred_ehr':pred_ehr,
             'pred_cxr': pred_cxr,
@@ -192,60 +210,210 @@ class LateFuse(BaseFuseTrainer):
         
         return mixed_data
 
+    def compute_loss_weights(self, grads):
+        # Before stacking, normalize each gradient and reshape to same dimension
+        normalized_grads = []
+        for g in grads:
+            # Flatten the gradients first
+            g_flat = g.view(-1)
+            # Normalize
+            g_norm = g_flat / (g_flat.norm() + 1e-8)
+            normalized_grads.append(g_norm)
+        
+        # Pad shorter gradients to match the longest one
+        max_length = max(g.numel() for g in normalized_grads)
+        padded_grads = []
+        for g in normalized_grads:
+            if g.numel() < max_length:
+                padding = torch.zeros(max_length - g.numel(), device=g.device)
+                g_padded = torch.cat([g, padding])
+            else:
+                g_padded = g
+            padded_grads.append(g_padded)
+        
+        # Now stack the padded gradients
+        grads = torch.stack(padded_grads)
+        
+        # Compute Gram matrix
+        G = torch.mm(grads, grads.t())
+        
+        # Solve min_a a^T G a s.t. a >= 0, sum(a) = 1
+        n_tasks = len(grads)
+        a = torch.ones(n_tasks, device=grads.device) / n_tasks
+        
+        for _ in range(20):  # Usually converges in a few iterations
+            grad_f = torch.mv(G, a)
+            min_idx = torch.argmin(grad_f)
+            v = torch.zeros_like(a)
+            v[min_idx] = 1.0
+            gamma = 2.0 / (2.0 + _)
+            a = (1.0 - gamma) * a + gamma * v
+        
+        # Rescale weights based on gradient magnitudes
+        weights = a / grads.norm(dim=1)
+        weights = weights / weights.sum()
+        return weights
+    
+    def get_ada_kd_weight(self, gamma):
+        # tanh
+        if self.hparams['model']['ada_kd_weight_type'] == 'tanh':
+            alpha = 1.0
+            weight = torch.exp(-alpha * (gamma - 1).clamp(min=0))
+
+        # sigmoid
+        elif self.hparams['model']['ada_kd_weight_type'] == 'sigmoid':
+            alpha, beta = 5.0, 0.5
+            weight = beta + (1-beta) / (1 + torch.exp(alpha * (gamma - 1)))
+
+        # power law
+        elif self.hparams['model']['ada_kd_weight_type'] == 'power_law':
+            alpha = 2.0
+            weight = 1 / (gamma ** alpha)
+
+        # soft threshold
+        elif self.hparams['model']['ada_kd_weight_type'] == 'soft_threshold':
+            threshold = 1.2
+            slope = 5.0
+            weight = torch.relu(threshold - gamma) * slope + 0.1
+
+        return weight
+
     def training_step(self, batch, batch_idx):
         # Decide whether to apply mixing and which type
-        do_mixing = np.random.random() < self.mix_prob
+        do_mixing = self.hparams['model']['enable_mixing'] and np.random.random() < self.mix_prob
         if do_mixing:
             mixing_type = np.random.choice(['mixup', 'cutmix'])
             mixed_batch = self._mix_data(batch, mixing_type)
-            
-            # Forward pass with mixed data
-            out = self._shared_step(mixed_batch)
-            
-            # Compute mixed loss
-            pairs = mixed_batch['has_cxr']
             lam = mixed_batch['lambda']
-            
-            # Compute loss with both original and mixed labels
-            loss_fuse_orig = self._compute_masked_pred_loss(
-                out['predictions'], 
-                mixed_batch['labels'],  # original labels
-                pairs
-            )
-            loss_fuse_mixed = self._compute_masked_pred_loss(
-                out['predictions'], 
-                mixed_batch['mixed_labels'],  # mixed labels
-                pairs
-            )
-            loss_fuse = lam * loss_fuse_orig + (1 - lam) * loss_fuse_mixed
-            
-            # Handle distillation losses if enabled
-            if self.hparams['model']['ehr_modal_distill']:
-                ehr_mask = torch.ones_like(out['feat_ehr'][:, 0])
-                loss_ehr_distill = lam * self._compute_masked_distill_loss(
-                    out['feat_ehr'], 
-                    out['feat_ehr_teacher'].data, 
-                    ehr_mask
-                ) + (1 - lam) * self._compute_masked_distill_loss(
-                    out['feat_ehr'], 
-                    out['feat_ehr_teacher'].data, 
-                    ehr_mask
-                )
-                loss_total = loss_fuse + self.ehr_distill_loss_weight * loss_ehr_distill
-            else:
-                loss_total = loss_fuse
-            
         else:
-            # Original forward pass without mixing
-            out = self._shared_step(batch)
-            pairs = batch['has_cxr']
-            loss_fuse = self._compute_masked_pred_loss(out['predictions'], batch['labels'], pairs)
+            lam = 1.0
+
+        # Enable gradient tracking for computing per-task gradients
+        self.zero_grad()
+        out = self._shared_step(batch)
+        pairs = batch['has_cxr']
+
+        # Compute prediction loss (size: [batch_size, num_classes])
+        loss_fuse = self.pred_criterion(out['predictions'], batch['labels']).mean(dim=1)
+        if do_mixing:
+            loss_fuse_mixed = self.pred_criterion(out['predictions'], mixed_batch['mixed_labels']).mean(dim=1)
+            loss_fuse = lam * loss_fuse + (1 - lam) * loss_fuse_mixed
+
+        # Compute distillation loss if enabled
+        if self.hparams['model']['ehr_modal_distill']:
+            loss_ehr_distill = self.distill_criterion(out['feat_ehr'], out['feat_ehr_teacher'].data).mean(dim=1)
+        else:
+            loss_ehr_distill = torch.tensor(0.0, device=loss_fuse.device)
+
+        if self.hparams['model']['cxr_modal_distill']:
+            loss_cxr_distill = self.distill_criterion(out['feat_cxr'], out['feat_cxr_teacher'].data).mean(dim=1)
+        else:
+            loss_cxr_distill = torch.tensor(0.0, device=loss_fuse.device)
+
+        # Compute individual weight for fusion loss and distillation loss, for each individual, measure the BCE loss
+        # of the prediction produced by the teacher model and the fusion model. If the fusion model is better, the weight
+        # of the distillation loss should be lower since fusion is beneficial for this individual.
+        # Get teacher model predictions
+        if self.ada_loss_weight:
+            # with torch.no_grad():
+                # if self.hparams['model']['ehr_modal_distill']:
+                #     ehr_teacher_loss = self.pred_criterion(out['pred_ehr_teacher'], batch['labels']).mean(dim=1)
+                # else:
+                #     ehr_teacher_loss = torch.zeros_like(loss_fuse)
+                    
+                # if self.hparams['model']['cxr_modal_distill']:
+                #     cxr_teacher_loss = self.pred_criterion(out['pred_cxr_teacher'], batch['labels']).mean(dim=1)
+                # else:
+                #     cxr_teacher_loss = torch.zeros_like(loss_fuse)
+
+            # Compare fusion model performance using scores
+            with torch.no_grad():
+                # Convert logits to probabilities
+                p_fuse = torch.sigmoid(out['predictions'])
+                p_ehr = torch.sigmoid(out['pred_ehr_teacher']) if self.hparams['model']['ehr_modal_distill'] else None
+                p_cxr = torch.sigmoid(out['pred_cxr_teacher']) if self.hparams['model']['cxr_modal_distill'] else None
+                
+                labels = batch['labels']
+                
+                # Compute scores: y*p + (1-y)*(1-p)
+                s_fuse = labels * p_fuse + (1 - labels) * (1 - p_fuse)
+                s_fuse = s_fuse.mean(dim=1)  # Average across classes
+                
+                if self.hparams['model']['ehr_modal_distill']:
+                    s_ehr = labels * p_ehr + (1 - labels) * (1 - p_ehr)
+                    s_ehr = s_ehr.mean(dim=1)
+                    # Compute gamma and weights
+                    gamma_ehr = s_fuse / (s_ehr + 1e-8)  # Add epsilon to prevent division by zero
+                    ehr_distill_weight = torch.where(
+                        gamma_ehr <= 1,
+                        torch.ones_like(gamma_ehr),
+                        self.get_ada_kd_weight(gamma_ehr)
+                    )
+                else:
+                    ehr_distill_weight = torch.ones_like(loss_ehr_distill)
+
+                if self.hparams['model']['cxr_modal_distill']:
+                    s_cxr = labels * p_cxr + (1 - labels) * (1 - p_cxr)
+                    s_cxr = s_cxr.mean(dim=1)
+                    # Compute gamma and weights
+                    gamma_cxr = s_fuse / (s_cxr + 1e-8)
+                    cxr_distill_weight = torch.where(
+                        gamma_cxr <= 1,
+                        torch.ones_like(gamma_cxr),
+                        self.get_ada_kd_weight(gamma_cxr)
+                    )
+                else:
+                    cxr_distill_weight = torch.ones_like(loss_cxr_distill)
+
+        else:
+            gamma_ehr = torch.zeros_like(loss_ehr_distill)
+            gamma_cxr = torch.zeros_like(loss_cxr_distill)
+            ehr_distill_weight = torch.ones_like(loss_ehr_distill)
+            cxr_distill_weight = torch.ones_like(loss_cxr_distill)
+
+        # Apply weights to distillation losses
+        loss_ehr_distill = (loss_ehr_distill * ehr_distill_weight).sum() / (ehr_distill_weight.sum())
+        loss_cxr_distill = (loss_cxr_distill * cxr_distill_weight).sum() / (cxr_distill_weight.sum())
+        loss_fuse = loss_fuse.mean()
+
+
+        # Perform MGDA: find optimal loss weights using the Frank-Wolfe algorithm
+        if self.hparams['model']['ehr_modal_distill'] or self.hparams['model']['cxr_modal_distill']:
+            losses = [loss_fuse, loss_ehr_distill, loss_cxr_distill]
+            grads = []
+            for loss in losses:
+                if torch.is_tensor(loss) and loss.requires_grad:
+                    self.zero_grad()
+                    loss.backward(retain_graph=True)
+                    grad = []
+                    for param in self.parameters():
+                        if param.grad is not None:
+                            grad.append(param.grad.view(-1))
+                    grad = torch.cat(grad)
+                    grads.append(grad)
+                else:
+                    grads.append(torch.zeros_like(grads[0]) if grads else torch.zeros(1))
+
+            # Compute optimal loss weights
+            self.loss_weights = self.compute_loss_weights(grads)
+            
+            # Compute weighted total loss
+            loss_total = (self.loss_weights[0] * loss_fuse + 
+                         self.loss_weights[1] * (loss_ehr_distill) +
+                         self.loss_weights[2] * (loss_cxr_distill))
+        else:
             loss_total = loss_fuse
-        
+
         # Log metrics
         self.log_dict({
             'loss/train': loss_total.detach(),
-            'mix_lambda': torch.tensor(lam) if do_mixing else torch.tensor(1.0),
+            'loss/train_weight': self.loss_weights[0],
+            'loss/distill_weight': self.loss_weights[1],
+            'ada_kd_weight/gamma_ehr': gamma_ehr.float().mean(),
+            'ada_kd_weight/gamma_cxr': gamma_cxr.float().mean(),
+            'ada_kd_weight/ratio_fusion_better_than_ehr': (gamma_ehr>1).float().mean(),
+            'ada_kd_weight/ratio_fusion_better_than_cxr': (gamma_cxr>1).float().mean(),
+            'mix_lambda': torch.tensor(lam),
             'mix_type': torch.tensor(1.0 if mixing_type == 'mixup' else 2.0) if do_mixing else torch.tensor(0.0),
         }, on_epoch=True, on_step=True, batch_size=batch['labels'].shape[0])
         
@@ -269,8 +437,11 @@ class LateFuse(BaseFuseTrainer):
 
         return  loss_total        
     
-    def _compute_masked_pred_loss(self, input, target, mask):
-        return (self.pred_criterion(input, target).mean(dim=1) * mask).sum() / max(mask.sum(), 1e-6)
+    def _compute_masked_pred_loss(self, input, target, mask, sample_weight=None):
+        loss = self.pred_criterion(input, target).mean(dim=1)
+        if sample_weight is not None:
+            loss = loss * sample_weight
+        return (loss * mask).sum() / max(mask.sum(), 1e-6)
     
     def _compute_masked_distill_loss(self, input, target, mask):
         return (self.distill_criterion(input, target).mean(dim=1) * mask).sum() / max(mask.sum(), 1e-6)

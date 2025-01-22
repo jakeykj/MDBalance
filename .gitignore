@@ -5,6 +5,7 @@ data_pkls/*.pkl
 
 experiments/
 multirun/
+results/
 
 outputs/
 teacher_model_checkpoints/*.ckpt
