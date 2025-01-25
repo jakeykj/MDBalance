@@ -18,6 +18,7 @@ class LateFuse(BaseFuseTrainer):
         self.pred_criterion = nn.BCEWithLogitsLoss(reduction='none')
 
         # set class number
+        self.class_names = hparams.get('class_names', None)
         self.num_classes = 25 if hparams['data']['task'] == 'phenotype' else 1
 
         # EHR transformer
@@ -333,7 +334,7 @@ class LateFuse(BaseFuseTrainer):
                 p_ehr = torch.sigmoid(out['pred_ehr_teacher']) if self.hparams['model']['ehr_modal_distill'] else None
                 p_cxr = torch.sigmoid(out['pred_cxr_teacher']) if self.hparams['model']['cxr_modal_distill'] else None
                 
-                labels = batch['labels']
+                labels = batch['labels']  # [batch_size, num_classes]
                 
                 # Compute scores: y*p + (1-y)*(1-p)
                 s_fuse = labels * p_fuse + (1 - labels) * (1 - p_fuse)
@@ -344,10 +345,11 @@ class LateFuse(BaseFuseTrainer):
                     s_ehr = s_ehr.mean(dim=1)
                     # Compute gamma and weights
                     gamma_ehr = s_fuse / (s_ehr + 1e-8)  # Add epsilon to prevent division by zero
+                    confidence_ehr = (torch.abs(p_fuse - 0.5) / (torch.abs(p_ehr - 0.5) + 1e-8)).mean(dim=1)
                     ehr_distill_weight = torch.where(
                         gamma_ehr <= 1,
                         torch.ones_like(gamma_ehr),
-                        self.get_ada_kd_weight(gamma_ehr)
+                        self.get_ada_kd_weight(gamma_ehr)*self.get_ada_kd_weight(confidence_ehr)
                     )
                 else:
                     ehr_distill_weight = torch.ones_like(loss_ehr_distill)
@@ -355,12 +357,13 @@ class LateFuse(BaseFuseTrainer):
                 if self.hparams['model']['cxr_modal_distill']:
                     s_cxr = labels * p_cxr + (1 - labels) * (1 - p_cxr)
                     s_cxr = s_cxr.mean(dim=1)
+                    confidence_cxr = (torch.abs(p_fuse - 0.5) / (torch.abs(p_cxr - 0.5) + 1e-8)).mean(dim=1)
                     # Compute gamma and weights
                     gamma_cxr = s_fuse / (s_cxr + 1e-8)
                     cxr_distill_weight = torch.where(
                         gamma_cxr <= 1,
                         torch.ones_like(gamma_cxr),
-                        self.get_ada_kd_weight(gamma_cxr)
+                        self.get_ada_kd_weight(gamma_cxr)*self.get_ada_kd_weight(confidence_cxr)
                     )
                 else:
                     cxr_distill_weight = torch.ones_like(loss_cxr_distill)

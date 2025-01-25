@@ -43,7 +43,7 @@ def set_seed(seed):
 def run_model(cfg: DictConfig):
     set_seed(cfg.seed)
     
-    ############# Create model #############
+    ############# Create model and data loaders #############
     if cfg.stage == 'uniehr':
         model_class = UniEHRTransformer
 
@@ -57,14 +57,13 @@ def run_model(cfg: DictConfig):
     else:
         raise ValueError(f'Unknown stage `{cfg.stage}`')
     
-    model = model_class(cfg)
-
-    ############# Create data loaders #############
     train_loader, val_loader, test_loader = create_data_loaders(cfg.data.ehr_root, None, cfg.data.task,
                                                                 cfg.data.fold, cfg.training.batch_size, cfg.training.num_workers,
                                                                 matched_subset=cfg.data.matched, index=None, seed=cfg.seed, one_hot=False,
                                                                 pkl_dir=cfg.data.pkl_dir, resized_base_path=cfg.data.resized_cxr_root,
                                                                 image_meta_path=cfg.data.image_meta_path)
+    model = model_class(cfg)
+    model.class_names = train_loader.dataset.CLASSES
 
     
     ############# Configure training and logging #############
