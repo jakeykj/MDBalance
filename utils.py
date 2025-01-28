@@ -336,7 +336,7 @@ def seed_worker(worker_id):
 
 
 def create_data_loaders(ehr_data_dir, cxr_data_dir, task, replication, batch_size,
-                        num_workers, time_limit=None,matched_subset = False,index = None,seed = None, one_hot=False,
+                        num_workers, time_limit=None, matched_subset=True,index = None,seed = None, one_hot=False,
                         pkl_dir='./data_pkls/', resized_base_path='/research/mimic_cxr_resized',
                         image_meta_path="/hdd/datasets/mimic-cxr-jpg/2.0.0/mimic-cxr-2.0.0-metadata.csv"):
     set_seed(seed)

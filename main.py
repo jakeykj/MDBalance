@@ -1,5 +1,6 @@
 import os
 import pickle
+import shutil
 import yaml
 import time
 import argparse
@@ -39,33 +40,9 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-@hydra.main(config_path='configs', config_name='default', version_base=None)
-def run_model(cfg: DictConfig):
+def train_model(model, cfg, log_dir, train_loader, val_loader, stage):
     set_seed(cfg.seed)
-    
-    ############# Create model and data loaders #############
-    if cfg.stage == 'uniehr':
-        model_class = UniEHRTransformer
 
-    elif cfg.stage == 'unicxr':
-        model_class = UniCXRModel
-        cfg.data.matched = True  # use only matched data for unicxr model
-
-    elif cfg.stage == 'fuse':
-        model_class = LateFuse
-    
-    else:
-        raise ValueError(f'Unknown stage `{cfg.stage}`')
-    
-    train_loader, val_loader, test_loader = create_data_loaders(cfg.data.ehr_root, None, cfg.data.task,
-                                                                cfg.data.fold, cfg.training.batch_size, cfg.training.num_workers,
-                                                                matched_subset=cfg.data.matched, index=None, seed=cfg.seed, one_hot=False,
-                                                                pkl_dir=cfg.data.pkl_dir, resized_base_path=cfg.data.resized_cxr_root,
-                                                                image_meta_path=cfg.data.image_meta_path)
-    model = model_class(cfg)
-    model.class_names = train_loader.dataset.CLASSES
-
-    
     ############# Configure training and logging #############
     callback_metric = 'overall/PRAUC'
     early_stop_callback = EarlyStopping(monitor=callback_metric,
@@ -75,14 +52,11 @@ def run_model(cfg: DictConfig):
                                         mode="max")
 
     # file name
-    log_dir = f'./experiments/{cfg.data.task}_{"matched" if cfg.data.matched else "fulldata"}/{cfg.stage}'
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    ver_name = (f'{cfg.name or "run"}-seed{cfg.seed}-{time.strftime("%Y%m%d%H%M%S")}')
-
-    tb_logger = pl_loggers.TensorBoardLogger(save_dir=log_dir, version=ver_name)
-    csv_logger = pl_loggers.CSVLogger(save_dir=log_dir, version=ver_name)
+    tb_logger = pl_loggers.TensorBoardLogger(save_dir=log_dir, version=stage, name='')
+    csv_logger = pl_loggers.CSVLogger(save_dir=log_dir, version=stage, name='')
 
     # save the best model in the valid
     checkpoint_callback = ModelCheckpoint(
@@ -105,22 +79,97 @@ def run_model(cfg: DictConfig):
                         callbacks=[early_stop_callback, checkpoint_callback])
     
     ############# Train model #############
+
     trainer.fit(model=model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
-    ############# Test model #############
+    # after training, restore the best model
     best_model_path = checkpoint_callback.best_model_path
-    print(f"best_model_path: {best_model_path}")
+    model = model.__class__.load_from_checkpoint(best_model_path, strict=False)
 
-    best_model = model_class.load_from_checkpoint(best_model_path, strict=False)
+    out = {
+        'trainer': trainer,
+        'model': model,
+        'best_model_path': best_model_path,
+        'log_dir': csv_logger.log_dir,
+    }
 
+    return out
+
+
+@hydra.main(config_path='configs', config_name='default', version_base=None)
+def train_fusion_model(cfg: DictConfig):
+    set_seed(cfg.seed)
+    
+    ############# Prepare data loaders #############
+    train_loader, val_loader, test_loader = create_data_loaders(ehr_data_dir=cfg.data.ehr_root,
+                                                                cxr_data_dir=None,
+                                                                task=cfg.data.task,
+                                                                replication=cfg.data.fold,
+                                                                batch_size=cfg.training.batch_size,
+                                                                num_workers=cfg.training.num_workers,
+                                                                matched_subset=cfg.data.matched,
+                                                                seed=cfg.seed,
+                                                                pkl_dir=cfg.data.pkl_dir,
+                                                                resized_base_path=cfg.data.resized_cxr_root,
+                                                                image_meta_path=cfg.data.image_meta_path)
+
+    log_dir = f'./experiments/{cfg.data.task}/{cfg.name}-seed{cfg.seed}-{time.strftime("%Y%m%d%H%M%S")}'
+
+    
+    ############# Stage 1(a): Uni-EHR training, skip if distillation is not enabled #############
+    if cfg.model.ehr_modal_distill:
+        if not cfg.retrain_teachers and os.path.exists(cfg.ehr_chkp):
+            uniehr_teacher_model = UniEHRTransformer.load_from_checkpoint(cfg.ehr_chkp, map_location='cpu')
+            print(f"Loaded UniEHR model from {cfg.ehr_chkp}")
+        else:
+            print('Training UniEHR model from scratch. If the checkpoint already exists, it will be overwritten.')
+            uniehr_teacher_model = UniEHRTransformer(cfg)
+            
+            out = train_model(model=uniehr_teacher_model, cfg=cfg, log_dir=log_dir,
+                              train_loader=train_loader, val_loader=val_loader, stage='uniehr')
+            uniehr_teacher_model = out['model']
+            shutil.copy(out['best_model_path'], cfg.ehr_chkp)
+                
+    else:
+        uniehr_teacher_model = None
+    
+    ############# Stage 1(b): Uni-CXR training, skip if distillation is not enabled #############
+    if cfg.model.cxr_modal_distill:
+        if not cfg.retrain_teachers and os.path.exists(cfg.cxr_chkp):
+            unicxr_teacher_model = UniCXRModel.load_from_checkpoint(cfg.cxr_chkp, map_location='cpu')
+            print(f"Loaded UniCXR model from {cfg.cxr_chkp}")
+        else:
+            print('Training UniCXR model from scratch. If the checkpoint already exists, it will be overwritten.')
+            unicxr_teacher_model = UniCXRModel(cfg)
+            out = train_model(model=unicxr_teacher_model, cfg=cfg, log_dir=log_dir,
+                              train_loader=train_loader, val_loader=val_loader, stage='unicxr')
+            unicxr_teacher_model = out['model']
+            shutil.copy(out['best_model_path'], cfg.cxr_chkp)
+    else:
+        unicxr_teacher_model = None
+    
+    ############# Stage 2: Fusion model training #############
+    fuse_model = LateFuse(cfg)
+    fuse_model.class_names = train_loader.dataset.CLASSES
+    out = train_model(model=fuse_model, cfg=cfg, log_dir=log_dir,
+                      train_loader=train_loader, val_loader=val_loader, stage='fuse')
+    fuse_model = out['model']
+    best_model_path = out['best_model_path']
+    trainer = out['trainer']
+    
+    ############# Testing #############
     if not cfg.dev_run:
+        best_model = LateFuse.load_from_checkpoint(best_model_path, map_location='cpu')
+        best_model.class_names = train_loader.dataset.CLASSES
         trainer.test(model=best_model, dataloaders=test_loader)
-        with open(os.path.join(csv_logger.log_dir, 'test_set_results.yaml'), 'w') as f:
+        with open(os.path.join(out['log_dir'], 'test_set_results.yaml'), 'w') as f:
             yaml.dump(best_model.test_results, f)
         print(best_model.test_results)
+
+    print(f'The best model is saved in {best_model_path}')
     
     return best_model.test_results
 
 
 if __name__ == '__main__':
-    test_results = run_model()
+    test_results = train_fusion_model()

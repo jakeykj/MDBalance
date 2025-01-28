@@ -14,7 +14,10 @@ data:
   image_meta_path: /hdd/datasets/mimic-cxr-jpg/2.0.0/mimic-cxr-2.0.0-metadata.csv
   pkl_dir: './data_pkls'
 
-stage: "fuse"
+retrain_teachers: false
+ehr_chkp: teacher_model_checkpoints/phenotype_EHR_seed42.ckpt
+cxr_chkp: teacher_model_checkpoints/phenotype_CXR_seed42.ckpt
+
 
 # Model parameters
 model:
@@ -23,24 +26,14 @@ model:
   
   ehr_modal_distill: true  # flag for performing EHR distillation
   cxr_modal_distill: true  # flag for performing CXR distillation
-  ehr_distill_loss_weight: 1
-  cxr_distill_loss_weight: 1
-  
-  enable_mixing: false  # flag for performing mixup and cutmix
-  mixup_alpha: 0.2  # alpha for mixup
-  cutmix_alpha: 1.0  # alpha for cutmix
-  mix_prob: 0.5  # probability of performing mixup or cutmix
-  lambda_min: 0.3  # minimum lambda for mixup
   
   grad_clip_val: 1.0  # gradient clipping value
   
   ada_loss_weight: true  # flag for performing adaptive distillation loss weight
   ada_kd_weight_type: "power_law"
+  ada_kd_alpha: 2.0
 
 ehr_model:
-  checkpoint_path:
-    mortality: ./teacher_model_checkpoints/mortality_matched_fold1_ehr_0.61.ckpt
-    phenotype: ./teacher_model_checkpoints/phenotype_matched_fold1_ehr_0.42.ckpt
   hidden_size: 256
   n_head: 4
   n_layers: 1
@@ -48,10 +41,7 @@ ehr_model:
   criterion: "bce"
 
 cxr_model:
-  checkpoint_path: 
-    mortality: ./teacher_model_checkpoints/mortality_matched_fold1_cxr_0.26.ckpt
-    phenotype: ./teacher_model_checkpoints/phenotype_matched_fold1_cxr_0.39.ckpt
-  hidden_size: 256  # retrain?
+  hidden_size: 256
   dropout: 0.2
 
 # Training parameters

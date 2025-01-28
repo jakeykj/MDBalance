@@ -9,3 +9,6 @@ results/
 
 outputs/
 teacher_model_checkpoints/*.ckpt
+
+experiments_old/
+teacher_model_checkpoints_bk/

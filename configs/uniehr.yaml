@@ -12,7 +12,7 @@ data:
   ehr_root: /research/miccai/datasets/mimiciv_multimodal_full/data
   resized_cxr_root: /research/mimic_cxr_resized
   image_meta_path: /hdd/datasets/mimic-cxr-jpg/2.0.0/mimic-cxr-2.0.0-metadata.csv
-  pkl_dir: null
+  pkl_dir: './data_pkls'
 
 stage: "uniehr"
 

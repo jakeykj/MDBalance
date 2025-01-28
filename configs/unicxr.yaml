@@ -7,7 +7,7 @@ dev_run: false
 data:
   task: phenotype
   fold: 1
-  matched: false
+  matched: true
   timestep: 1.0
   ehr_root: /research/miccai/datasets/mimiciv_multimodal_full/data
   resized_cxr_root: /research/mimic_cxr_resized

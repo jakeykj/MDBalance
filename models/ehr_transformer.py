@@ -19,12 +19,13 @@ class LearnablePositionalEncoding(nn.Module):
 
 
 class EHRTransformer(nn.Module):
-    def __init__(self, input_size, num_classes,
+    def __init__(self, input_size, num_classes,  # num_classes represents number of binary tasks
                  d_model=256, n_head=8, n_layers=2,
                  dropout=0.3, max_len=350):
         super().__init__()
         self.d_model = d_model
         self.max_len = max_len
+        self.num_tasks = num_classes  # Each class becomes a binary task
 
         # Input embedding
         self.emb = nn.Linear(input_size, d_model)
@@ -44,20 +45,27 @@ class EHRTransformer(nn.Module):
         self.feat_norm = nn.LayerNorm(d_model)
     
         
-        # self.fc = nn.Linear(d_model, num_classes)
-        # Enhanced MLP head for classification
-        self.fc = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.LayerNorm(d_model * 2),
-            nn.Linear(d_model * 2, d_model),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, num_classes)
-        )
-        
+        # Task-specific representation layers
+        self.task_specific_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.LayerNorm(d_model)
+            ) for _ in range(self.num_tasks)
+        ])
+
+        # Binary classification heads for each task
+        self.task_heads = nn.ModuleList([
+            nn.Sequential(
+                # nn.Linear(d_model, d_model),
+                # nn.ReLU(),
+                # nn.Dropout(dropout),
+                # nn.LayerNorm(d_model),
+                nn.Linear(d_model, 1)  # Binary output for each task
+            ) for _ in range(self.num_tasks)
+        ])
+
         # Initialize weights
         self._init_weights()
 
@@ -89,47 +97,62 @@ class EHRTransformer(nn.Module):
         padding_mask = torch.ones_like(attn_mask).unsqueeze(2)
         padding_mask[attn_mask==float('-inf')] = 0
         
-        ehr_representation = (padding_mask * feat).sum(dim=1) / padding_mask.sum(dim=1)
-        output = self.fc(ehr_representation)
-        return ehr_representation, output
+        # Global representation
+        global_repr = (padding_mask * feat).sum(dim=1) / padding_mask.sum(dim=1)
+        
+        # Generate task-specific representations and predictions
+        task_representations = []
+        task_outputs = []
+        
+        for task_idx in range(self.num_tasks):
+            task_repr = self.task_specific_layers[task_idx](global_repr)
+            task_output = self.task_heads[task_idx](task_repr)
+            
+            task_representations.append(task_repr)
+            task_outputs.append(task_output)
+        
+        # Stack outputs for convenience
+        task_outputs = torch.cat(task_outputs, dim=1)  # Shape: [batch_size, num_tasks]
+        
+        return task_representations, task_outputs
 
 
-class TransformerEncoder(nn.Module):
-    def __init__(self, input_size, num_classes,
-                 d_model=256, n_head=8, n_layers=2,
-                 dropout=0.3, max_len=350):
-        super().__init__()
-        self.d_model = d_model
-        self.max_len = max_len
+# class TransformerEncoder(nn.Module):
+#     def __init__(self, input_size, num_classes,
+#                  d_model=256, n_head=8, n_layers=2,
+#                  dropout=0.3, max_len=350):
+#         super().__init__()
+#         self.d_model = d_model
+#         self.max_len = max_len
 
-        self.emb = nn.Linear(input_size, d_model)
-        # self.emb = nn.Embedding(num_tokens, d_model, padding_idx=num_tokens)
-        self.pos_encoder = LearnablePositionalEncoding(d_model, dropout=0, max_len=max_len)
+#         self.emb = nn.Linear(input_size, d_model)
+#         # self.emb = nn.Embedding(num_tokens, d_model, padding_idx=num_tokens)
+#         self.pos_encoder = LearnablePositionalEncoding(d_model, dropout=0, max_len=max_len)
 
-        layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_head, batch_first=True, dropout=dropout)
-        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
+#         layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_head, batch_first=True, dropout=dropout)
+#         self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
 
-        self.fc = nn.Linear(d_model, num_classes)
+#         self.fc = nn.Linear(d_model, num_classes)
 
-    def forward(self, x, seq_lengths, output_prob=False):
-        attn_mask = torch.stack([torch.cat([torch.zeros(len_, device=x.device),
-                                 float('-inf')*torch.ones(max(seq_lengths)-len_, device=x.device)])
-                                for len_ in seq_lengths])
-        x = self.emb(x) # * math.sqrt(self.d_model)
-        x = self.pos_encoder(x)
-        feat = self.encoder(x, src_key_padding_mask=attn_mask)
-        feat = self.encoder(feat, src_key_padding_mask=attn_mask)
+#     def forward(self, x, seq_lengths, output_prob=False):
+#         attn_mask = torch.stack([torch.cat([torch.zeros(len_, device=x.device),
+#                                  float('-inf')*torch.ones(max(seq_lengths)-len_, device=x.device)])
+#                                 for len_ in seq_lengths])
+#         x = self.emb(x) # * math.sqrt(self.d_model)
+#         x = self.pos_encoder(x)
+#         feat = self.encoder(x, src_key_padding_mask=attn_mask)
+#         feat = self.encoder(feat, src_key_padding_mask=attn_mask)
 
-        padding_mask = torch.ones_like(attn_mask).unsqueeze(2)
-        padding_mask[attn_mask==float('-inf')] = 0
-        feat = (padding_mask * feat).sum(dim=1) / padding_mask.sum(dim=1)
+#         padding_mask = torch.ones_like(attn_mask).unsqueeze(2)
+#         padding_mask[attn_mask==float('-inf')] = 0
+#         feat = (padding_mask * feat).sum(dim=1) / padding_mask.sum(dim=1)
 
-        prediction = self.fc(feat)
+#         prediction = self.fc(feat)
 
-        if output_prob:
-            prediction = prediction.sigmoid()
+#         if output_prob:
+#             prediction = prediction.sigmoid()
 
-        return feat, prediction
+#         return feat, prediction
 
 
 class UniEHRTransformer(BaseFuseTrainer):

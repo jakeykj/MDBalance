@@ -103,9 +103,9 @@ def worker_process(gpu_id: int, job_queue: mp.Queue, result_queue: mp.Queue, sto
 
 def main():
     parser = argparse.ArgumentParser(description='Hyperparameter tuning script')
-    parser.add_argument('--gpus', type=int, nargs='+', default=[0],
+    parser.add_argument('--gpus', type=int, nargs='+', default=[0,1,2,3],
                       help='List of GPU IDs to use')
-    parser.add_argument('--experiments-per-gpu', type=int, default=1,
+    parser.add_argument('--experiments-per-gpu', type=int, default=2,
                       help='Number of experiments to run per GPU')
     parser.add_argument('--output-dir', type=str, default='hparam_search_results',
                       help='Directory to save results')
@@ -117,9 +117,10 @@ def main():
 
     # Define hyperparameter search space
     param_grid = {
-        'model.hidden_size': [128, 256, 512],
-        'model.dropout': [0.1, 0.3, 0.5],
-        'training.learning_rate': [1e-4, 3e-4],
+        'data.task': ['phenotype', 'mortality'],
+        'seed': [42, 25, 1],
+        'name': ['currentBest'],
+        'retrain_teachers': [True],
     }
 
     # Generate all combinations of hyperparameters
